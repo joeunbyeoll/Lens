@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>꼭짓점 렌즈</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #000; color: #eee; font-family: -apple-system, sans-serif; overflow: hidden; height: 100dvh; display: flex; flex-direction: column; }
+#stage { position: relative; flex: 1; overflow: hidden; }
+canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+#bg { z-index: 0; }
+#overlay { z-index: 1; }
+.controls {
+  z-index: 10; position: relative;
+  background: rgba(0,0,0,0.75);
+  backdrop-filter: blur(10px);
+  padding: 10px 14px;
+  display: flex; flex-wrap: wrap;
+  gap: 10px 20px; align-items: center;
+  border-top: 0.5px solid rgba(255,255,255,0.1);
+}
+.ctrl { display: flex; align-items: center; gap: 8px; }
+label { font-size: 12px; color: rgba(255,255,255,0.55); white-space: nowrap; }
+input[type=range] { width: 80px; accent-color: #EF9F27; }
+.val { font-size: 12px; color: #EF9F27; min-width: 32px; }
+button {
+  font-size: 12px; padding: 5px 12px;
+  border-radius: 6px;
+  border: 0.5px solid rgba(255,255,255,0.25);
+  background: rgba(255,255,255,0.08);
+  color: #eee; cursor: pointer; white-space: nowrap;
+}
+button:hover { background: rgba(255,255,255,0.16); }
+button.active { background: rgba(239,159,39,0.25); border-color: #EF9F27; color: #EF9F27; }
+#hint {
+  position: absolute; bottom: 8px; left: 0; right: 0;
+  z-index: 5; text-align: center;
+  font-size: 12px; color: rgba(255,255,255,0.3);
+  pointer-events: none;
+}
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="bg"></canvas>
+  <canvas id="overlay"></canvas>
+  <div id="hint">화면을 들고 실제 공간을 향해 찍어보세요</div>
+</div>
+<div class="controls">
+  <div class="ctrl">
+    <label>선 개수</label>
+    <input type="range" id="lines" min="6" max="48" value="20" step="2">
+    <span class="val" id="lines-val">20</span>
+  </div>
+  <div class="ctrl">
+    <label>원뿔 각도</label>
+    <input type="range" id="coneAngle" min="15" max="160" value="60">
+    <span class="val" id="coneAngle-val">60°</span>
+  </div>
+  <div class="ctrl">
+    <label>왜곡</label>
+    <input type="range" id="distort" min="0" max="100" value="40">
+    <span class="val" id="distort-val">40</span>
+  </div>
+  <div class="ctrl">
+    <label>선 밝기</label>
+    <input type="range" id="lineAlpha" min="10" max="100" value="60">
+    <span class="val" id="lineAlpha-val">60</span>
+  </div>
+  <div class="ctrl">
+    <label>배경 투명도</label>
+    <input type="range" id="bgAlpha" min="0" max="100" value="0">
+    <span class="val" id="bgAlpha-val">0</span>
+  </div>
+  <button id="camBtn" onclick="toggleCamera()">📷 카메라 켜기</button>
+  <button id="invertBtn" onclick="toggleInvert()">반전</button>
+</div>
+<script>
+const bgCanvas = document.getElementById('bg');
+const bgCtx = bgCanvas.getContext('2d');
+const ovCanvas = document.getElementById('overlay');
+const ovCtx = ovCanvas.getContext('2d');
+
+let params = { lines: 20, coneAngle: 60, distort: 40, lineAlpha: 60, bgAlpha: 0 };
+let inverted = false;
+let stream = null;
+let video = null;
+let t = 0;
+
+function resize() {
+  const stage = document.getElementById('stage');
+  const W = stage.clientWidth, H = stage.clientHeight;
+  const dpr = window.devicePixelRatio || 1;
+  bgCanvas.width = ovCanvas.width = W * dpr;
+  bgCanvas.height = ovCanvas.height = H * dpr;
+  bgCanvas.style.width = ovCanvas.style.width = W + 'px';
+  bgCanvas.style.height = ovCanvas.style.height = H + 'px';
+  bgCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ovCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function drawBg() {
+  const W = bgCanvas.width / (window.devicePixelRatio||1);
+  const H = bgCanvas.height / (window.devicePixelRatio||1);
+  bgCtx.clearRect(0, 0, W, H);
+  if (video && stream && video.readyState >= 2) {
+    const alpha = params.bgAlpha / 100;
+    bgCtx.globalAlpha = alpha;
+    const vW = video.videoWidth, vH = video.videoHeight;
+    const scale = Math.max(W/vW, H/vH);
+    const dw = vW*scale, dh = vH*scale;
+    bgCtx.drawImage(video, (W-dw)/2, (H-dh)/2, dw, dh);
+    bgCtx.globalAlpha = 1;
+  }
+}
+
+function drawCone() {
+  const W = ovCanvas.width / (window.devicePixelRatio||1);
+  const H = ovCanvas.height / (window.devicePixelRatio||1);
+  ovCtx.clearRect(0, 0, W, H);
+  const cx = W/2, cy = H/2;
+  const maxR = Math.min(W, H) * 0.52;
+  const halfAngleRad = (params.coneAngle / 2) * Math.PI / 180;
+  const distortStrength = params.distort / 100;
+  const alpha = params.lineAlpha / 100;
+  const lineCount = params.lines;
+  const col = inverted ? `rgba(0,0,0,${alpha})` : `rgba(255,255,255,${alpha})`;
+  const colFaint = inverted ? `rgba(0,0,0,${alpha*0.3})` : `rgba(255,255,255,${alpha*0.3})`;
+
+  if (!stream || params.bgAlpha < 5) {
+    ovCtx.fillStyle = inverted ? '#fff' : '#000';
+    ovCtx.fillRect(0, 0, W, H);
+  }
+
+  for (let i = 0; i < lineCount; i++) {
+    const frac = i / lineCount;
+    const baseAngle = frac * Math.PI * 2;
+    const warpedAngle = baseAngle + Math.sin(baseAngle * 2) * distortStrength * halfAngleRad * 0.6;
+    const dx = Math.cos(warpedAngle), dy = Math.sin(warpedAngle);
+    const innerR = maxR * (1 - Math.cos(halfAngleRad)) * 0.28;
+    const x1 = cx + dx * innerR, y1 = cy + dy * innerR;
+    const x2 = cx + dx * maxR, y2 = cy + dy * maxR;
+    ovCtx.beginPath();
+    ovCtx.moveTo(x1, y1);
+    if (distortStrength > 0.05) {
+      const midR = innerR + (maxR - innerR) * 0.5;
+      const curvePull = distortStrength * 18 * Math.sin(halfAngleRad);
+      ovCtx.quadraticCurveTo(
+        cx + dx * midR + (-dy * curvePull),
+        cy + dy * midR + (dx * curvePull),
+        x2, y2
+      );
+    } else {
+      ovCtx.lineTo(x2, y2);
+    }
+    ovCtx.strokeStyle = col;
+    ovCtx.lineWidth = 0.8;
+    ovCtx.stroke();
+  }
+
+  const rings = 9;
+  for (let i = 1; i <= rings; i++) {
+    const frac = i / rings;
+    const compressionExp = 1 + (1 - Math.sin(halfAngleRad)) * distortStrength * 2;
+    const r = Math.pow(frac, compressionExp) * maxR;
+    ovCtx.beginPath();
+    ovCtx.arc(cx, cy, r, 0, Math.PI * 2);
+    ovCtx.strokeStyle = colFaint;
+    ovCtx.lineWidth = 0.5;
+    ovCtx.stroke();
+  }
+
+  const pulse = 2 + Math.sin(t * 0.04) * 1;
+  ovCtx.beginPath();
+  ovCtx.arc(cx, cy, pulse, 0, Math.PI * 2);
+  ovCtx.fillStyle = '#EF9F27';
+  ovCtx.fill();
+  t++;
+}
+
+function loop() { drawBg(); drawCone(); requestAnimationFrame(loop); }
+function bind(id, key, suffix) {
+  const el = document.getElementById(id);
+  const vEl = document.getElementById(id + '-val');
+  el.addEventListener('input', () => {
+    params[key] = parseFloat(el.value);
+    vEl.textContent = el.value + (suffix || '');
+  });
+}
+bind('lines', 'lines', '');
+bind('coneAngle', 'coneAngle', '°');
+bind('distort', 'distort', '');
+bind('lineAlpha', 'lineAlpha', '');
+bind('bgAlpha', 'bgAlpha', '');
+
+function toggleInvert() {
+  inverted = !inverted;
+  document.getElementById('invertBtn').classList.toggle('active', inverted);
+}
+
+async function toggleCamera() {
+  const btn = document.getElementById('camBtn');
+  if (stream) {
+    stream.getTracks().forEach(t => t.stop());
+    stream = null; video = null;
+    btn.textContent = '📷 카메라 켜기';
+    btn.classList.remove('active');
+    document.getElementById('bgAlpha').value = 0;
+    params.bgAlpha = 0;
+    document.getElementById('bgAlpha-val').textContent = '0';
+  } else {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' } },
+        audio: false
+      });
+      video = document.createElement('video');
+      video.srcObject = stream;
+      video.setAttribute('playsinline', '');
+      video.muted = true;
+      await video.play();
+      btn.textContent = '📷 카메라 끄기';
+      btn.classList.add('active');
+      document.getElementById('bgAlpha').value = 85;
+      params.bgAlpha = 85;
+      document.getElementById('bgAlpha-val').textContent = '85';
+    } catch (e) {
+      alert('카메라 접근 권한이 필요해요.\n브라우저 설정에서 카메라를 허용해주세요.');
+    }
+  }
+}
+
+window.addEventListener('resize', resize);
+resize();
+loop();
+</script>
+</body>
+</html>
+
