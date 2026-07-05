@@ -1,4 +1,4 @@
-<!DOCTYPE html> 
+<!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -10,37 +10,35 @@ body { background: #000; color: #eee; font-family: -apple-system, sans-serif; ov
 #stage { position: relative; flex: 1; overflow: hidden; touch-action: none; }
 canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 #glc { z-index: 0; }
-#oc { z-index: 1; }
+#oc  { z-index: 1; pointer-events: none; }
 .controls {
   z-index: 10; position: relative;
-  background: rgba(0,0,0,0.82);
-  backdrop-filter: blur(10px);
-  padding: 10px 14px;
-  display: flex; flex-wrap: wrap;
+  background: rgba(0,0,0,0.82); backdrop-filter: blur(10px);
+  padding: 10px 14px; display: flex; flex-wrap: wrap;
   gap: 10px 18px; align-items: center;
-  border-top: 0.5px solid rgba(255,255,255,0.1);
+  border-top: 0.5px solid rgba(255,255,255,0.08);
 }
 .ctrl { display: flex; align-items: center; gap: 8px; }
-label { font-size: 12px; color: rgba(255,255,255,0.5); white-space: nowrap; }
-input[type=range] { width: 76px; accent-color: #EF9F27; }
-.val { font-size: 12px; color: #EF9F27; min-width: 30px; }
-button { font-size: 12px; padding: 5px 12px; border-radius: 6px; border: 0.5px solid rgba(255,255,255,0.2); background: rgba(255,255,255,0.07); color: #eee; cursor: pointer; white-space: nowrap; }
-button:hover { background: rgba(255,255,255,0.14); }
-button.active { background: rgba(239,159,39,0.22); border-color: #EF9F27; color: #EF9F27; }
-#hint { position: absolute; bottom: 8px; left: 0; right: 0; z-index: 5; text-align: center; font-size: 12px; color: rgba(255,255,255,0.28); pointer-events: none; transition: opacity 1s; }
+label { font-size: 12px; color: rgba(255,255,255,0.45); white-space: nowrap; }
+input[type=range] { width: 78px; accent-color: #ccc; }
+.val { font-size: 12px; color: rgba(255,255,255,0.7); min-width: 30px; }
+button { font-size: 12px; padding: 5px 12px; border-radius: 6px; border: 0.5px solid rgba(255,255,255,0.18); background: rgba(255,255,255,0.06); color: #eee; cursor: pointer; white-space: nowrap; }
+button:hover { background: rgba(255,255,255,0.12); }
+button.active { background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.5); }
+#hint { position: absolute; bottom: 8px; left: 0; right: 0; z-index: 5; text-align: center; font-size: 12px; color: rgba(255,255,255,0.22); pointer-events: none; transition: opacity 1.5s; }
 </style>
 </head>
 <body>
 <div id="stage">
   <canvas id="glc"></canvas>
   <canvas id="oc"></canvas>
-  <div id="hint">꼭짓점을 드래그해서 위치를 조정하세요 · 카메라를 켜고 공간을 향해 찍어보세요</div>
+  <div id="hint">꼭짓점을 드래그 · 카메라를 켜고 공간을 향해 찍어보세요</div>
 </div>
 <div class="controls">
   <div class="ctrl">
     <label>면 개수</label>
-    <input type="range" id="faces" min="3" max="12" value="5" step="1">
-    <span class="val" id="faces-val">5</span>
+    <input type="range" id="faces" min="3" max="40" value="6" step="1">
+    <span class="val" id="faces-val">6</span>
   </div>
   <div class="ctrl">
     <label>왜곡 강도</label>
@@ -49,13 +47,8 @@ button.active { background: rgba(239,159,39,0.22); border-color: #EF9F27; color:
   </div>
   <div class="ctrl">
     <label>구멍 크기</label>
-    <input type="range" id="hole" min="0" max="30" value="8">
-    <span class="val" id="hole-val">8</span>
-  </div>
-  <div class="ctrl">
-    <label>선 밝기</label>
-    <input type="range" id="lineA" min="0" max="100" value="50">
-    <span class="val" id="lineA-val">50</span>
+    <input type="range" id="hole" min="0" max="25" value="7">
+    <span class="val" id="hole-val">7</span>
   </div>
   <button id="camBtn" onclick="toggleCamera()">📷 카메라 켜기</button>
   <button id="invBtn" onclick="toggleInvert()">반전</button>
@@ -73,98 +66,102 @@ void main(){
 <script id="fs" type="x-shader/x-fragment">
 precision highp float;
 uniform sampler2D u_tex;
-uniform vec2 u_apex;     // 꼭짓점 위치 (0~1 UV)
-uniform float u_warp;    // 왜곡 강도
-uniform float u_hole;    // 꼭짓점 구멍 반경
+uniform vec2  u_apex;
+uniform float u_warp;
+uniform float u_hole;
 uniform float u_aspect;
-uniform int u_faces;     // 면 개수
-uniform bool u_invert;
+uniform float u_faces;   // float for smooth interpolation
+uniform bool  u_invert;
+uniform float u_time;
 varying vec2 v_uv;
 
-#define PI 3.14159265
+#define PI 3.14159265359
+#define TAU 6.28318530718
 
 void main(){
-  vec2 uv = v_uv;
+  vec2 uv   = v_uv;
   vec2 apex = u_apex;
 
-  // 꼭짓점 기준 벡터 (aspect 보정)
   vec2 d = uv - apex;
   d.x *= u_aspect;
-  float dist = length(d);
-  float angle = atan(d.y, d.x);
+  float dist  = length(d);
+  float angle = atan(d.y, d.x);   // -PI ~ PI
 
-  // 면 분할: 어느 면에 속하는지 판별
-  float sectorAngle = 2.0 * PI / float(u_faces);
-  float normalizedAngle = mod(angle + PI, 2.0 * PI); // 0 ~ 2PI
-  float sectorIndex = floor(normalizedAngle / sectorAngle);
-  float localAngle = mod(normalizedAngle, sectorAngle); // 면 내부 각도 0~sectorAngle
-  float faceMid = sectorAngle * 0.5;
+  // --- 면 분할 왜곡 (선 없이 각도만) ---
+  float sectorA = TAU / u_faces;
+  float normA   = mod(angle + PI, TAU);          // 0 ~ TAU
+  float localA  = mod(normA, sectorA);           // 면 내부 각도
+  float faceMid = sectorA * 0.5;
+  float offset  = localA - faceMid;              // 면 중앙에서 벗어난 정도
 
-  // 각 면의 중심 방향으로 왜곡 — 면 중앙에서 멀수록 더 당겨짐
-  float faceOffset = localAngle - faceMid; // 면 중앙에서 얼마나 벗어났는지
-  float warpAngle = angle - faceOffset * u_warp * 0.6; // 중앙 방향으로 각도 보정
+  // 면이 많아질수록(원뿔에 가까워질수록) offset 영향이 줄어들어 자연스럽게 수렴
+  float faceBlend = min(1.0, 6.0 / u_faces);    // 면이 많으면 0에 가까워짐
+  float warpAngle = angle - offset * u_warp * 0.55 * faceBlend;
 
-  // 거리 왜곡: 꼭짓점에 가까울수록 수렴
-  float warpedDist = dist * (1.0 - u_warp * 0.7 * exp(-dist * 3.5));
+  // 거리 왜곡: 중심 수렴
+  float warpedDist = dist * (1.0 - u_warp * 0.65 * exp(-dist * 3.2));
 
-  // 왜곡된 UV
-  vec2 warpedD;
-  warpedD.x = cos(warpAngle) * warpedDist / u_aspect;
-  warpedD.y = sin(warpAngle) * warpedDist;
-  vec2 warpedUV = apex + warpedD;
+  vec2 wd;
+  wd.x = cos(warpAngle) * warpedDist / u_aspect;
+  wd.y = sin(warpAngle) * warpedDist;
+  vec2 warpedUV = apex + wd;
 
-  // 꼭짓점 구멍: 반경 이내면 왜곡 없이 원본 영상
-  float holeR = u_hole * 0.01;
-  float holeBlend = smoothstep(holeR * 0.6, holeR, dist);
-
-  // 구멍 안: 원본 UV, 구멍 밖: 왜곡 UV
-  vec2 finalUV = mix(uv, warpedUV, holeBlend);
-
-  // 범위 클램프
-  finalUV = clamp(finalUV, 0.0, 1.0);
+  // --- 구멍: 부드럽게 원본 영상으로 전환 ---
+  float holeR     = u_hole * 0.012;
+  float holeBlend = smoothstep(holeR * 0.5, holeR * 1.4, dist);
+  vec2 finalUV    = mix(uv, warpedUV, holeBlend);
+  finalUV         = clamp(finalUV, 0.001, 0.999);
 
   vec4 color = texture2D(u_tex, finalUV);
 
-  // 면 경계선 강조 (분할선)
-  float edgeDist = min(localAngle, sectorAngle - localAngle) / sectorAngle;
-  float edge = 1.0 - smoothstep(0.0, 0.04, edgeDist);
-  color.rgb = mix(color.rgb, color.rgb * 0.3, edge * 0.7);
-
-  // 구멍 가장자리 빛 효과
-  float rim = smoothstep(holeR, holeR * 1.3, dist) * (1.0 - smoothstep(holeR * 1.3, holeR * 2.0, dist));
-  color.rgb += vec3(0.94, 0.63, 0.15) * rim * 0.5;
+  // --- 구멍 주변: 환영 같은 빛 번짐 ---
+  // 구멍 가장자리에서 바깥으로 부드럽게 빛이 퍼지는 halo
+  float innerGlow = smoothstep(holeR * 1.8, holeR * 0.8, dist)
+                  * smoothstep(0.0, holeR * 0.6, dist);
+  // 미세한 시간 흔들림으로 환영 느낌
+  float shimmer   = 0.85 + 0.15 * sin(u_time * 1.3 + dist * 40.0);
+  // 구멍 안쪽: 과노출처럼 밝아짐
+  float exposure  = mix(1.0, 1.6 * shimmer, smoothstep(holeR, 0.0, dist));
+  color.rgb      *= exposure;
+  // halo: 흰빛이 바깥으로 번짐 (채도 낮추고 밝게)
+  float haloStr   = innerGlow * 0.55 * shimmer;
+  color.rgb       = mix(color.rgb, vec3(1.0), haloStr);
 
   if(u_invert) color.rgb = 1.0 - color.rgb;
 
-  gl_FragColor = color;
+  gl_FragColor = vec4(color.rgb, 1.0);
 }
 </script>
 
 <script>
-const stage = document.getElementById('stage');
+const stage   = document.getElementById('stage');
 const glCanvas = document.getElementById('glc');
-const oc = document.getElementById('oc');
-const oCtx = oc.getContext('2d');
+const oc      = document.getElementById('oc');
+const oCtx    = oc.getContext('2d');
 
-let params = { warp: 0.55, hole: 8, faces: 5, lineA: 0.5, invert: false };
-let apex = { x: 0.5, y: 0.5 }; // UV 좌표
+let params = { warp: 0.55, hole: 7, faces: 6, invert: false };
+let apex   = { x: 0.5, y: 0.5 };
 let stream = null, video = null;
-let gl, prog, tex, t = 0;
-let dragging = false;
+let gl, prog, tex, startTime = performance.now();
+let dragging = false, t = 0;
 
-// --- WebGL ---
 function initGL() {
   gl = glCanvas.getContext('webgl') || glCanvas.getContext('experimental-webgl');
   if (!gl) return false;
-  const vs = mkShader(gl.VERTEX_SHADER, document.getElementById('vs').text);
+  const vs = mkShader(gl.VERTEX_SHADER,   document.getElementById('vs').text);
   const fs = mkShader(gl.FRAGMENT_SHADER, document.getElementById('fs').text);
   prog = gl.createProgram();
   gl.attachShader(prog, vs); gl.attachShader(prog, fs);
-  gl.linkProgram(prog); gl.useProgram(prog);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+    console.error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
 
   const buf = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,1,-1,1,1,-1,1]), gl.STATIC_DRAW);
+  gl.bufferData(gl.ARRAY_BUFFER,
+    new Float32Array([-1,-1, 1,-1, -1,1,  1,-1, 1,1, -1,1]),
+    gl.STATIC_DRAW);
   const loc = gl.getAttribLocation(prog, 'a_pos');
   gl.enableVertexAttribArray(loc);
   gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
@@ -177,10 +174,12 @@ function initGL() {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   return true;
 }
+
 function mkShader(type, src) {
   const s = gl.createShader(type);
   gl.shaderSource(s, src); gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    console.error(gl.getShaderInfoLog(s));
   return s;
 }
 
@@ -188,137 +187,99 @@ function resize() {
   const W = stage.clientWidth, H = stage.clientHeight;
   const dpr = window.devicePixelRatio || 1;
   [glCanvas, oc].forEach(c => {
-    c.width = W * dpr; c.height = H * dpr;
-    c.style.width = W + 'px'; c.style.height = H + 'px';
+    c.width  = W * dpr; c.height = H * dpr;
+    c.style.width  = W + 'px'; c.style.height = H + 'px';
   });
   oCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   if (gl) gl.viewport(0, 0, glCanvas.width, glCanvas.height);
 }
 
-function render() {
-  const dpr = window.devicePixelRatio || 1;
-  const W = stage.clientWidth, H = stage.clientHeight;
+// 더미 텍스처 (카메라 없을 때)
+let dummyTex = null;
+function makeDummy() {
+  const size = 128;
+  const px = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const i = (y * size + x) * 4;
+    px[i]   = Math.floor(x / size * 30 + 8);
+    px[i+1] = Math.floor(y / size * 22 + 6);
+    px[i+2] = Math.floor((x+y)/(size*2) * 40 + 10);
+    px[i+3] = 255;
+  }
+  return px;
+}
 
-  // WebGL
+function render() {
+  const W = stage.clientWidth, H = stage.clientHeight;
+  const elapsed = (performance.now() - startTime) / 1000;
+
   if (gl) {
+    gl.bindTexture(gl.TEXTURE_2D, tex);
     if (video && stream && video.readyState >= 2) {
-      gl.bindTexture(gl.TEXTURE_2D, tex);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
     } else {
-      // 카메라 없을 때 그라디언트 시뮬레이션
-      const size = 64;
-      const px = new Uint8Array(size * size * 4);
-      for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
-        const i = (y * size + x) * 4;
-        px[i] = Math.floor(x / size * 40 + 10);
-        px[i+1] = Math.floor(y / size * 30 + 8);
-        px[i+2] = Math.floor((x + y) / (size*2) * 50 + 14);
-        px[i+3] = 255;
-      }
-      gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      if (!dummyTex) dummyTex = makeDummy();
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 128, 128, 0, gl.RGBA, gl.UNSIGNED_BYTE, dummyTex);
     }
 
-    const set1f = (n, v) => gl.uniform1f(gl.getUniformLocation(prog, n), v);
-    const set2f = (n, x, y) => gl.uniform2f(gl.getUniformLocation(prog, n), x, y);
-    const set1i = (n, v) => gl.uniform1i(gl.getUniformLocation(prog, n), v);
-
-    gl.uniform1i(gl.getUniformLocation(prog, 'u_tex'), 0);
-    set2f('u_apex', apex.x, 1.0 - apex.y); // WebGL Y축 반전
-    set1f('u_warp', params.warp);
-    set1f('u_hole', params.hole);
-    set1f('u_aspect', W / H);
-    set1i('u_faces', params.faces);
-    set1i('u_invert', params.invert ? 1 : 0);
+    const u = n => gl.getUniformLocation(prog, n);
+    gl.uniform1i(u('u_tex'), 0);
+    gl.uniform2f(u('u_apex'), apex.x, 1.0 - apex.y);
+    gl.uniform1f(u('u_warp'), params.warp);
+    gl.uniform1f(u('u_hole'), params.hole);
+    gl.uniform1f(u('u_aspect'), W / H);
+    gl.uniform1f(u('u_faces'), params.faces);
+    gl.uniform1i(u('u_invert'), params.invert ? 1 : 0);
+    gl.uniform1f(u('u_time'), elapsed);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
   }
 
-  // 오버레이: 꼭짓점 마커 + 분할선
-  drawOverlay(W, H);
+  drawOverlay(W, H, elapsed);
   t++;
   requestAnimationFrame(render);
 }
 
-function drawOverlay(W, H) {
+function drawOverlay(W, H, elapsed) {
   oCtx.clearRect(0, 0, W, H);
   const ax = apex.x * W, ay = apex.y * H;
-  const alpha = params.lineA;
-  if (alpha < 0.01) {
-    // 마커만
-    drawApexMarker(ax, ay, 0.6);
-    return;
-  }
+  const holeR = params.hole * 0.012 * Math.min(W, H);
 
-  // 분할선 (꼭짓점에서 각 면 경계로)
-  const n = params.faces;
-  const maxR = Math.max(W, H) * 1.5;
-  for (let i = 0; i < n; i++) {
-    const a = (i / n) * Math.PI * 2;
-    const ex = ax + Math.cos(a) * maxR;
-    const ey = ay + Math.sin(a) * maxR;
-    const grad = oCtx.createLinearGradient(ax, ay, ex, ey);
-    grad.addColorStop(0, `rgba(255,255,255,0)`);
-    grad.addColorStop(0.05, `rgba(255,255,255,${alpha * 0.5})`);
-    grad.addColorStop(1, `rgba(255,255,255,${alpha * 0.08})`);
-    oCtx.beginPath();
-    oCtx.moveTo(ax, ay);
-    oCtx.lineTo(ex, ey);
-    oCtx.strokeStyle = grad;
-    oCtx.lineWidth = 0.8;
-    oCtx.stroke();
-  }
-
-  drawApexMarker(ax, ay, alpha);
-}
-
-function drawApexMarker(ax, ay, alpha) {
-  // 구멍 표시
-  const holeR = params.hole * 0.01 * Math.min(stage.clientWidth, stage.clientHeight) * 0.52;
+  // 드래그 핸들: 아주 작고 반투명한 원
   oCtx.beginPath();
-  oCtx.arc(ax, ay, Math.max(holeR, 4), 0, Math.PI * 2);
-  oCtx.strokeStyle = `rgba(239,159,39,${alpha * 0.7})`;
-  oCtx.lineWidth = 1;
+  oCtx.arc(ax, ay, Math.max(holeR + 6, 14), 0, Math.PI * 2);
+  oCtx.strokeStyle = 'rgba(255,255,255,0.15)';
+  oCtx.lineWidth = 0.8;
   oCtx.stroke();
-
-  const pulse = 2.5 + Math.sin(t * 0.04);
-  oCtx.beginPath();
-  oCtx.arc(ax, ay, pulse, 0, Math.PI * 2);
-  oCtx.fillStyle = '#EF9F27';
-  oCtx.fill();
 }
 
-// --- 꼭짓점 드래그 ---
+// --- 드래그 ---
 function getUV(e) {
-  const rect = stage.getBoundingClientRect();
+  const r   = stage.getBoundingClientRect();
   const src = e.touches ? e.touches[0] : e;
   return {
-    x: Math.max(0, Math.min(1, (src.clientX - rect.left) / rect.width)),
-    y: Math.max(0, Math.min(1, (src.clientY - rect.top) / rect.height))
+    x: Math.max(0, Math.min(1, (src.clientX - r.left) / r.width)),
+    y: Math.max(0, Math.min(1, (src.clientY - r.top)  / r.height))
   };
 }
-
-function isNearApex(e) {
+function nearApex(e) {
   const uv = getUV(e);
   const dx = (uv.x - apex.x) * stage.clientWidth;
   const dy = (uv.y - apex.y) * stage.clientHeight;
-  return Math.hypot(dx, dy) < 40;
+  return Math.hypot(dx, dy) < 44;
 }
 
-stage.addEventListener('pointerdown', e => {
-  if (isNearApex(e)) { dragging = true; e.preventDefault(); }
-});
-window.addEventListener('pointerup', () => dragging = false);
+stage.addEventListener('pointerdown', e => { if (nearApex(e)) { dragging = true; e.preventDefault(); } });
+window.addEventListener('pointerup',   () => dragging = false);
 window.addEventListener('pointermove', e => {
   if (!dragging) return;
-  const uv = getUV(e);
-  apex.x = uv.x; apex.y = uv.y;
+  const uv = getUV(e); apex.x = uv.x; apex.y = uv.y;
 });
-stage.addEventListener('touchstart', e => { if (isNearApex(e)) { dragging = true; e.preventDefault(); } }, { passive: false });
-stage.addEventListener('touchmove', e => { if (dragging) e.preventDefault(); }, { passive: false });
+stage.addEventListener('touchstart', e => { if (nearApex(e)) { dragging = true; e.preventDefault(); } }, { passive: false });
+stage.addEventListener('touchmove',  e => { if (dragging) e.preventDefault(); }, { passive: false });
 
 // --- 슬라이더 ---
 function bind(id, key, suffix, fn) {
-  const el = document.getElementById(id);
+  const el  = document.getElementById(id);
   const vEl = document.getElementById(id + '-val');
   el.addEventListener('input', () => {
     const v = parseFloat(el.value);
@@ -327,9 +288,8 @@ function bind(id, key, suffix, fn) {
   });
 }
 bind('faces', 'faces', '');
-bind('warp', 'warp', '', v => v / 100);
-bind('hole', 'hole', '');
-bind('lineA', 'lineA', '', v => v / 100);
+bind('warp',  'warp',  '', v => v / 100);
+bind('hole',  'hole',  '');
 
 function toggleInvert() {
   params.invert = !params.invert;
@@ -358,7 +318,7 @@ async function toggleCamera() {
       btn.classList.add('active');
       document.getElementById('hint').style.opacity = '0';
     } catch (e) {
-      alert('카메라 권한이 필요해요.\nGitHub Pages에서 Safari로 열고 권한을 허용해주세요.');
+      alert('카메라 권한이 필요해요.\nGitHub Pages 주소를 Safari로 열고 권한을 허용해주세요.');
     }
   }
 }
