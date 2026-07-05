@@ -9,21 +9,21 @@
 body { background: #000; color: #eee; font-family: -apple-system, sans-serif; overflow: hidden; height: 100dvh; display: flex; flex-direction: column; }
 #stage { position: relative; flex: 1; overflow: hidden; }
 canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
-#bg { z-index: 0; }
-#overlay { z-index: 1; }
+#gl { z-index: 0; }
+#lines { z-index: 1; pointer-events: none; }
 .controls {
   z-index: 10; position: relative;
-  background: rgba(0,0,0,0.75);
+  background: rgba(0,0,0,0.8);
   backdrop-filter: blur(10px);
   padding: 10px 14px;
   display: flex; flex-wrap: wrap;
-  gap: 10px 20px; align-items: center;
+  gap: 10px 18px; align-items: center;
   border-top: 0.5px solid rgba(255,255,255,0.1);
 }
 .ctrl { display: flex; align-items: center; gap: 8px; }
 label { font-size: 12px; color: rgba(255,255,255,0.55); white-space: nowrap; }
 input[type=range] { width: 80px; accent-color: #EF9F27; }
-.val { font-size: 12px; color: #EF9F27; min-width: 32px; }
+.val { font-size: 12px; color: #EF9F27; min-width: 34px; }
 button {
   font-size: 12px; padding: 5px 12px;
   border-radius: 6px;
@@ -38,165 +38,244 @@ button.active { background: rgba(239,159,39,0.25); border-color: #EF9F27; color:
   z-index: 5; text-align: center;
   font-size: 12px; color: rgba(255,255,255,0.3);
   pointer-events: none;
+  transition: opacity 0.5s;
 }
 </style>
 </head>
 <body>
 <div id="stage">
-  <canvas id="bg"></canvas>
-  <canvas id="overlay"></canvas>
-  <div id="hint">화면을 들고 실제 공간을 향해 찍어보세요</div>
+  <canvas id="gl"></canvas>
+  <canvas id="lines"></canvas>
+  <div id="hint">카메라를 켜고 공간을 향해 찍어보세요</div>
 </div>
 <div class="controls">
   <div class="ctrl">
-    <label>선 개수</label>
-    <input type="range" id="lines" min="6" max="48" value="20" step="2">
-    <span class="val" id="lines-val">20</span>
+    <label>왜곡 강도</label>
+    <input type="range" id="warp" min="0" max="100" value="50">
+    <span class="val" id="warp-val">50</span>
   </div>
   <div class="ctrl">
     <label>원뿔 각도</label>
-    <input type="range" id="coneAngle" min="15" max="160" value="60">
-    <span class="val" id="coneAngle-val">60°</span>
+    <input type="range" id="angle" min="10" max="170" value="70">
+    <span class="val" id="angle-val">70°</span>
   </div>
   <div class="ctrl">
-    <label>왜곡</label>
-    <input type="range" id="distort" min="0" max="100" value="40">
-    <span class="val" id="distort-val">40</span>
-  </div>
-  <div class="ctrl">
-    <label>선 밝기</label>
-    <input type="range" id="lineAlpha" min="10" max="100" value="60">
-    <span class="val" id="lineAlpha-val">60</span>
-  </div>
-  <div class="ctrl">
-    <label>배경 투명도</label>
-    <input type="range" id="bgAlpha" min="0" max="100" value="0">
-    <span class="val" id="bgAlpha-val">0</span>
+    <label>선 오버레이</label>
+    <input type="range" id="lineAlpha" min="0" max="100" value="40">
+    <span class="val" id="lineAlpha-val">40</span>
   </div>
   <button id="camBtn" onclick="toggleCamera()">📷 카메라 켜기</button>
   <button id="invertBtn" onclick="toggleInvert()">반전</button>
 </div>
-<script>
-const bgCanvas = document.getElementById('bg');
-const bgCtx = bgCanvas.getContext('2d');
-const ovCanvas = document.getElementById('overlay');
-const ovCtx = ovCanvas.getContext('2d');
 
-let params = { lines: 20, coneAngle: 60, distort: 40, lineAlpha: 60, bgAlpha: 0 };
-let inverted = false;
-let stream = null;
-let video = null;
+<!-- Vertex Shader -->
+<script id="vs" type="x-shader/x-vertex">
+attribute vec2 a_pos;
+varying vec2 v_uv;
+void main() {
+  v_uv = a_pos * 0.5 + 0.5;
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}
+</script>
+
+<!-- Fragment Shader: 꼭짓점(중심)으로 수렴하는 왜곡 -->
+<script id="fs" type="x-shader/x-fragment">
+precision mediump float;
+uniform sampler2D u_tex;
+uniform float u_warp;      // 왜곡 강도 0~1
+uniform float u_angle;     // 원뿔 반각 (라디안)
+uniform float u_aspect;    // width/height
+uniform bool u_invert;
+varying vec2 v_uv;
+
+void main() {
+  // 중심 기준 좌표 (-1 ~ 1), aspect 보정
+  vec2 uv = v_uv * 2.0 - 1.0;
+  uv.x *= u_aspect;
+
+  float dist = length(uv);
+  vec2 dir = dist > 0.0 ? normalize(uv) : vec2(0.0);
+
+  // 원뿔 안쪽 투영: 거리에 따라 수렴 강도 변화
+  // 꼭짓점 각도가 좁을수록 더 강하게 빨려들어감
+  float coneFactor = tan(u_angle); // 원뿔 반각의 탄젠트 = 퍼짐 비율
+  float warpStrength = u_warp * 1.8;
+
+  // 비선형 왜곡: 중심에 가까울수록 더 강하게 수렴
+  float warpedDist = dist * (1.0 - warpStrength * exp(-dist * coneFactor * 2.5));
+
+  vec2 warpedUV = dir * warpedDist;
+  warpedUV.x /= u_aspect;
+  warpedUV = warpedUV * 0.5 + 0.5;
+
+  // 범위 밖은 검정
+  if (warpedUV.x < 0.0 || warpedUV.x > 1.0 || warpedUV.y < 0.0 || warpedUV.y > 1.0) {
+    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    return;
+  }
+
+  vec4 color = texture2D(u_tex, warpedUV);
+
+  if (u_invert) {
+    color.rgb = 1.0 - color.rgb;
+  }
+
+  gl_FragColor = color;
+}
+</script>
+
+<script>
+const glCanvas = document.getElementById('gl');
+const linesCanvas = document.getElementById('lines');
+const lCtx = linesCanvas.getContext('2d');
+
+let params = { warp: 0.5, angle: 70, lineAlpha: 0.4, invert: false };
+let stream = null, video = null;
+let gl, program, texture;
 let t = 0;
+
+// --- WebGL 초기화 ---
+function initGL() {
+  gl = glCanvas.getContext('webgl') || glCanvas.getContext('experimental-webgl');
+  if (!gl) { alert('WebGL을 지원하지 않는 브라우저예요.'); return false; }
+
+  const vs = compileShader(gl.VERTEX_SHADER, document.getElementById('vs').text);
+  const fs = compileShader(gl.FRAGMENT_SHADER, document.getElementById('fs').text);
+  program = gl.createProgram();
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  gl.useProgram(program);
+
+  // fullscreen quad
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    -1,-1,  1,-1,  -1,1,
+     1,-1,  1, 1,  -1,1
+  ]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(program, 'a_pos');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+  // texture
+  texture = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+  return true;
+}
+
+function compileShader(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  return s;
+}
 
 function resize() {
   const stage = document.getElementById('stage');
   const W = stage.clientWidth, H = stage.clientHeight;
   const dpr = window.devicePixelRatio || 1;
-  bgCanvas.width = ovCanvas.width = W * dpr;
-  bgCanvas.height = ovCanvas.height = H * dpr;
-  bgCanvas.style.width = ovCanvas.style.width = W + 'px';
-  bgCanvas.style.height = ovCanvas.style.height = H + 'px';
-  bgCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ovCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  [glCanvas, linesCanvas].forEach(c => {
+    c.width = W * dpr; c.height = H * dpr;
+    c.style.width = W + 'px'; c.style.height = H + 'px';
+  });
+  lCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (gl) gl.viewport(0, 0, glCanvas.width, glCanvas.height);
 }
 
-function drawBg() {
-  const W = bgCanvas.width / (window.devicePixelRatio||1);
-  const H = bgCanvas.height / (window.devicePixelRatio||1);
-  bgCtx.clearRect(0, 0, W, H);
-  if (video && stream && video.readyState >= 2) {
-    const alpha = params.bgAlpha / 100;
-    bgCtx.globalAlpha = alpha;
-    const vW = video.videoWidth, vH = video.videoHeight;
-    const scale = Math.max(W/vW, H/vH);
-    const dw = vW*scale, dh = vH*scale;
-    bgCtx.drawImage(video, (W-dw)/2, (H-dh)/2, dw, dh);
-    bgCtx.globalAlpha = 1;
+// --- 렌더 루프 ---
+function render() {
+  const W = glCanvas.width, H = glCanvas.height;
+  const dpr = window.devicePixelRatio || 1;
+  const dispW = W / dpr, dispH = H / dpr;
+
+  // WebGL: 카메라 왜곡
+  if (gl) {
+    if (video && stream && video.readyState >= 2) {
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+    } else {
+      // 카메라 없을 때: 그라디언트 텍스처 대신 검정
+      const px = new Uint8Array([10, 10, 14, 255]);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    }
+
+    gl.uniform1i(gl.getUniformLocation(program, 'u_tex'), 0);
+    gl.uniform1f(gl.getUniformLocation(program, 'u_warp'), params.warp);
+    gl.uniform1f(gl.getUniformLocation(program, 'u_angle'), params.angle * Math.PI / 180 / 2);
+    gl.uniform1f(gl.getUniformLocation(program, 'u_aspect'), dispW / dispH);
+    gl.uniform1i(gl.getUniformLocation(program, 'u_invert'), params.invert ? 1 : 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
   }
+
+  // 2D Canvas: 선 오버레이
+  drawLines(dispW, dispH);
+  t++;
+  requestAnimationFrame(render);
 }
 
-function drawCone() {
-  const W = ovCanvas.width / (window.devicePixelRatio||1);
-  const H = ovCanvas.height / (window.devicePixelRatio||1);
-  ovCtx.clearRect(0, 0, W, H);
+function drawLines(W, H) {
+  lCtx.clearRect(0, 0, W, H);
+  if (params.lineAlpha < 0.02) return;
+
   const cx = W/2, cy = H/2;
   const maxR = Math.min(W, H) * 0.52;
-  const halfAngleRad = (params.coneAngle / 2) * Math.PI / 180;
-  const distortStrength = params.distort / 100;
-  const alpha = params.lineAlpha / 100;
-  const lineCount = params.lines;
-  const col = inverted ? `rgba(0,0,0,${alpha})` : `rgba(255,255,255,${alpha})`;
-  const colFaint = inverted ? `rgba(0,0,0,${alpha*0.3})` : `rgba(255,255,255,${alpha*0.3})`;
+  const halfRad = (params.angle / 2) * Math.PI / 180;
+  const alpha = params.lineAlpha;
+  const col = `rgba(255,255,255,${alpha * 0.7})`;
+  const colF = `rgba(255,255,255,${alpha * 0.2})`;
 
-  if (!stream || params.bgAlpha < 5) {
-    ovCtx.fillStyle = inverted ? '#fff' : '#000';
-    ovCtx.fillRect(0, 0, W, H);
+  const n = 20;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    const innerR = maxR * (1 - Math.cos(halfRad)) * 0.2;
+    lCtx.beginPath();
+    lCtx.moveTo(cx + Math.cos(a) * innerR, cy + Math.sin(a) * innerR);
+    lCtx.lineTo(cx + Math.cos(a) * maxR, cy + Math.sin(a) * maxR);
+    lCtx.strokeStyle = col;
+    lCtx.lineWidth = 0.7;
+    lCtx.stroke();
   }
 
-  for (let i = 0; i < lineCount; i++) {
-    const frac = i / lineCount;
-    const baseAngle = frac * Math.PI * 2;
-    const warpedAngle = baseAngle + Math.sin(baseAngle * 2) * distortStrength * halfAngleRad * 0.6;
-    const dx = Math.cos(warpedAngle), dy = Math.sin(warpedAngle);
-    const innerR = maxR * (1 - Math.cos(halfAngleRad)) * 0.28;
-    const x1 = cx + dx * innerR, y1 = cy + dy * innerR;
-    const x2 = cx + dx * maxR, y2 = cy + dy * maxR;
-    ovCtx.beginPath();
-    ovCtx.moveTo(x1, y1);
-    if (distortStrength > 0.05) {
-      const midR = innerR + (maxR - innerR) * 0.5;
-      const curvePull = distortStrength * 18 * Math.sin(halfAngleRad);
-      ovCtx.quadraticCurveTo(
-        cx + dx * midR + (-dy * curvePull),
-        cy + dy * midR + (dx * curvePull),
-        x2, y2
-      );
-    } else {
-      ovCtx.lineTo(x2, y2);
-    }
-    ovCtx.strokeStyle = col;
-    ovCtx.lineWidth = 0.8;
-    ovCtx.stroke();
+  for (let i = 1; i <= 7; i++) {
+    const r = Math.pow(i/7, 1.5) * maxR;
+    lCtx.beginPath();
+    lCtx.arc(cx, cy, r, 0, Math.PI*2);
+    lCtx.strokeStyle = colF;
+    lCtx.lineWidth = 0.5;
+    lCtx.stroke();
   }
 
-  const rings = 9;
-  for (let i = 1; i <= rings; i++) {
-    const frac = i / rings;
-    const compressionExp = 1 + (1 - Math.sin(halfAngleRad)) * distortStrength * 2;
-    const r = Math.pow(frac, compressionExp) * maxR;
-    ovCtx.beginPath();
-    ovCtx.arc(cx, cy, r, 0, Math.PI * 2);
-    ovCtx.strokeStyle = colFaint;
-    ovCtx.lineWidth = 0.5;
-    ovCtx.stroke();
-  }
-
-  const pulse = 2 + Math.sin(t * 0.04) * 1;
-  ovCtx.beginPath();
-  ovCtx.arc(cx, cy, pulse, 0, Math.PI * 2);
-  ovCtx.fillStyle = '#EF9F27';
-  ovCtx.fill();
-  t++;
+  const pulse = 2.5 + Math.sin(t * 0.04) * 1;
+  lCtx.beginPath();
+  lCtx.arc(cx, cy, pulse, 0, Math.PI*2);
+  lCtx.fillStyle = '#EF9F27';
+  lCtx.fill();
 }
 
-function loop() { drawBg(); drawCone(); requestAnimationFrame(loop); }
-function bind(id, key, suffix) {
+// --- 슬라이더 ---
+function bind(id, key, suffix, transform) {
   const el = document.getElementById(id);
   const vEl = document.getElementById(id + '-val');
   el.addEventListener('input', () => {
-    params[key] = parseFloat(el.value);
+    const v = parseFloat(el.value);
+    params[key] = transform ? transform(v) : v;
     vEl.textContent = el.value + (suffix || '');
   });
 }
-bind('lines', 'lines', '');
-bind('coneAngle', 'coneAngle', '°');
-bind('distort', 'distort', '');
-bind('lineAlpha', 'lineAlpha', '');
-bind('bgAlpha', 'bgAlpha', '');
+bind('warp', 'warp', '', v => v / 100);
+bind('angle', 'angle', '°');
+bind('lineAlpha', 'lineAlpha', '', v => v / 100);
 
 function toggleInvert() {
-  inverted = !inverted;
-  document.getElementById('invertBtn').classList.toggle('active', inverted);
+  params.invert = !params.invert;
+  document.getElementById('invertBtn').classList.toggle('active', params.invert);
 }
 
 async function toggleCamera() {
@@ -206,13 +285,10 @@ async function toggleCamera() {
     stream = null; video = null;
     btn.textContent = '📷 카메라 켜기';
     btn.classList.remove('active');
-    document.getElementById('bgAlpha').value = 0;
-    params.bgAlpha = 0;
-    document.getElementById('bgAlpha-val').textContent = '0';
   } else {
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' } },
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
         audio: false
       });
       video = document.createElement('video');
@@ -222,19 +298,16 @@ async function toggleCamera() {
       await video.play();
       btn.textContent = '📷 카메라 끄기';
       btn.classList.add('active');
-      document.getElementById('bgAlpha').value = 85;
-      params.bgAlpha = 85;
-      document.getElementById('bgAlpha-val').textContent = '85';
+      document.getElementById('hint').style.opacity = '0';
     } catch (e) {
-      alert('카메라 접근 권한이 필요해요.\n브라우저 설정에서 카메라를 허용해주세요.');
+      alert('카메라 권한이 필요해요.\nSafari에서 열고 권한을 허용해주세요.');
     }
   }
 }
 
 window.addEventListener('resize', resize);
 resize();
-loop();
+if (initGL()) render();
 </script>
 </body>
 </html>
-
